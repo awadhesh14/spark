@@ -19,7 +19,6 @@ package org.apache.spark.sql.execution
 
 import java.util.concurrent.TimeUnit._
 
-import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.LogKeys.{COUNT, MAX_SPLIT_BYTES, OPEN_COST_IN_BYTES}
@@ -65,7 +64,7 @@ trait DataSourceScanExec extends LeafExecNode with StreamSourceAwareSparkPlan {
   override def simpleString(maxFields: Int): String = {
     val metadataEntries = metadata.toSeq.sorted.map {
       case (key, value) =>
-        key + ": " + StringUtils.abbreviate(redact(value), maxMetadataValueLength)
+        key + ": " + Utils.abbreviate(redact(value), maxMetadataValueLength)
     }
     val metadataStr = truncatedString(metadataEntries, " ", ", ", "", maxFields)
     redact(
@@ -189,6 +188,12 @@ case class RowDataSourceScanExec(
       seqToString(markedFilters.toSeq)
     }
 
+    val pushedJoins = if (pushedDownOperators.joinedRelations.length > 1) {
+      Map("PushedJoins" -> seqToString(pushedDownOperators.joinedRelations))
+    } else {
+      Map()
+    }
+
     Map("ReadSchema" -> requiredSchema.catalogString,
       "PushedFilters" -> pushedFilters) ++
       pushedDownOperators.aggregation.fold(Map[String, String]()) { v =>
@@ -200,7 +205,8 @@ case class RowDataSourceScanExec(
       offsetInfo ++
       pushedDownOperators.sample.map(v => "PushedSample" ->
         s"SAMPLE (${(v.upperBound - v.lowerBound) * 100}) ${v.withReplacement} SEED(${v.seed})"
-      )
+      ) ++
+      pushedJoins
   }
 
   // Don't care about `rdd` and `tableIdentifier`, and `stream` when canonicalizing.
@@ -561,7 +567,9 @@ trait FileSourceScanLike extends DataSourceScanExec {
 
     override def toPartitionArray: Array[PartitionedFile] = {
       partitionDirectories.flatMap { p =>
-        p.files.map { f => PartitionedFileUtil.getPartitionedFile(f, p.values, 0, f.getLen) }
+        p.files.map { f =>
+          PartitionedFileUtil.getPartitionedFile(f, f.getPath, p.values, 0, f.getLen)
+        }
       }
     }
 
@@ -789,11 +797,14 @@ case class FileSourceScanExec(
     val splitFiles = selectedPartitions.filePartitionIterator.flatMap { partition =>
       val ListingPartition(partitionVals, _, fileStatusIterator) = partition
       fileStatusIterator.flatMap { file =>
-        if (shouldProcess(file.getPath)) {
+        // getPath() is very expensive so we only want to call it once in this block:
+        val filePath = file.getPath
+        if (shouldProcess(filePath)) {
           val isSplitable = relation.fileFormat.isSplitable(
-              relation.sparkSession, relation.options, file.getPath)
+              relation.sparkSession, relation.options, filePath)
           PartitionedFileUtil.splitFiles(
             file = file,
+            filePath = filePath,
             isSplitable = isSplitable,
             maxSplitBytes = maxSplitBytes,
             partitionValues = partitionVals

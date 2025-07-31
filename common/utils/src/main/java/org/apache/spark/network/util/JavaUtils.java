@@ -22,18 +22,18 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.lang3.SystemUtils;
-
 import org.apache.spark.internal.SparkLogger;
 import org.apache.spark.internal.SparkLoggerFactory;
 import org.apache.spark.internal.LogKeys;
 import org.apache.spark.internal.MDC;
+import org.apache.spark.util.SparkSystemUtils$;
 
 /**
  * General utilities available in the network package. Many of these are sourced from Spark's
@@ -89,7 +89,7 @@ public class JavaUtils {
    * @param file Input file / dir to be deleted
    * @throws IOException if deletion is unsuccessful
    */
-  public static void deleteRecursively(File file) throws IOException {
+  public static void deleteRecursively(File file) throws IOException, InterruptedException {
     deleteRecursively(file, null);
   }
 
@@ -102,14 +102,16 @@ public class JavaUtils {
    *               are deleted.
    * @throws IOException if deletion is unsuccessful
    */
-  public static void deleteRecursively(File file, FilenameFilter filter) throws IOException {
+  public static void deleteRecursively(File file, FilenameFilter filter)
+      throws IOException, InterruptedException {
     if (file == null) { return; }
 
     // On Unix systems, use operating system command to run faster
     // If that does not work out, fallback to the Java IO way
     // We exclude Apple Silicon test environment due to the limited resource issues.
-    if (SystemUtils.IS_OS_UNIX && filter == null && !(SystemUtils.IS_OS_MAC_OSX &&
-        (System.getenv("SPARK_TESTING") != null || System.getProperty("spark.testing") != null))) {
+    if (SparkSystemUtils$.MODULE$.isUnix() && filter == null &&
+        !(SparkSystemUtils$.MODULE$.isMac() && (System.getenv("SPARK_TESTING") != null ||
+        System.getProperty("spark.testing") != null))) {
       try {
         deleteRecursivelyUsingUnixNative(file);
         return;
@@ -124,11 +126,12 @@ public class JavaUtils {
 
   private static void deleteRecursivelyUsingJavaIO(
       File file,
-      FilenameFilter filter) throws IOException {
-    if (!file.exists()) return;
-    BasicFileAttributes fileAttributes =
-      Files.readAttributes(file.toPath(), BasicFileAttributes.class);
-    if (fileAttributes.isDirectory() && !isSymlink(file)) {
+      FilenameFilter filter) throws IOException, InterruptedException {
+    BasicFileAttributes fileAttributes = readFileAttributes(file);
+    // SPARK-50716: If the file attributes are null, that is, the file attributes cannot be read,
+    // or if the file does not exist and is not a broken symbolic link, then return directly.
+    if (fileAttributes == null || (!file.exists() && !fileAttributes.isSymbolicLink())) return;
+    if (fileAttributes.isDirectory()) {
       IOException savedIOException = null;
       for (File child : listFilesSafely(file, filter)) {
         try {
@@ -143,8 +146,8 @@ public class JavaUtils {
       }
     }
 
-    // Delete file only when it's a normal file or an empty directory.
-    if (fileAttributes.isRegularFile() ||
+    // Delete file only when it's a normal file, a symbolic link, or an empty directory.
+    if (fileAttributes.isRegularFile() || fileAttributes.isSymbolicLink() ||
       (fileAttributes.isDirectory() && listFilesSafely(file, null).length == 0)) {
       boolean deleted = file.delete();
       // Delete can also fail if the file simply did not exist.
@@ -154,7 +157,20 @@ public class JavaUtils {
     }
   }
 
-  private static void deleteRecursivelyUsingUnixNative(File file) throws IOException {
+  /**
+   * Reads basic attributes of a given file, of return null if an I/O error occurs.
+   */
+  private static BasicFileAttributes readFileAttributes(File file) {
+    try {
+      return Files.readAttributes(
+        file.toPath(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+    } catch (IOException e) {
+      return null;
+    }
+  }
+
+  private static void deleteRecursivelyUsingUnixNative(File file)
+      throws InterruptedException, IOException {
     ProcessBuilder builder = new ProcessBuilder("rm", "-rf", file.getAbsolutePath());
     Process process = null;
     int exitCode = -1;
@@ -167,6 +183,10 @@ public class JavaUtils {
       process = builder.start();
 
       exitCode = process.waitFor();
+    } catch (InterruptedException e) {
+      // SPARK-51083: Specifically rethrow InterruptedException if it occurs, since swallowing
+      // it will lead to tasks missing cancellation.
+      throw e;
     } catch (Exception e) {
       throw new IOException("Failed to delete: " + file.getAbsolutePath(), e);
     } finally {
@@ -190,17 +210,6 @@ public class JavaUtils {
     } else {
       return new File[0];
     }
-  }
-
-  private static boolean isSymlink(File file) throws IOException {
-    Objects.requireNonNull(file);
-    File fileInCanonicalDir = null;
-    if (file.getParent() == null) {
-      fileInCanonicalDir = file;
-    } else {
-      fileInCanonicalDir = new File(file.getParentFile().getCanonicalFile(), file.getName());
-    }
-    return !fileInCanonicalDir.getCanonicalFile().equals(fileInCanonicalDir.getAbsoluteFile());
   }
 
   private static final Map<String, TimeUnit> timeSuffixes;

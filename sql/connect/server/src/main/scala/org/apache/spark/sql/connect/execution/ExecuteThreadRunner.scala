@@ -23,7 +23,6 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import com.google.protobuf.Message
-import org.apache.commons.lang3.StringUtils
 
 import org.apache.spark.SparkSQLException
 import org.apache.spark.connect.proto
@@ -61,6 +60,16 @@ private[connect] class ExecuteThreadRunner(executeHolder: ExecuteHolder) extends
       // This assertion does not hold if it is called more than once.
       assert(currentState == ThreadState.interrupted)
     }
+  }
+
+  /**
+   * Checks if the thread is alive.
+   *
+   * @return
+   *   true if the execution thread is currently running.
+   */
+  private[connect] def isAlive(): Boolean = {
+    executionThread.isAlive()
   }
 
   /**
@@ -199,16 +208,14 @@ private[connect] class ExecuteThreadRunner(executeHolder: ExecuteHolder) extends
             tag))
       }
       session.sparkContext.setJobDescription(
-        s"Spark Connect - ${StringUtils.abbreviate(debugString, 128)}")
+        s"Spark Connect - ${Utils.abbreviate(debugString, 128)}")
       session.sparkContext.setInterruptOnCancel(true)
 
       // Add debug information to the query execution so that the jobs are traceable.
       session.sparkContext.setLocalProperty(
         "callSite.short",
-        s"Spark Connect - ${StringUtils.abbreviate(debugString, 128)}")
-      session.sparkContext.setLocalProperty(
-        "callSite.long",
-        StringUtils.abbreviate(debugString, 2048))
+        s"Spark Connect - ${Utils.abbreviate(debugString, 128)}")
+      session.sparkContext.setLocalProperty("callSite.long", Utils.abbreviate(debugString, 2048))
 
       executeHolder.request.getPlan.getOpTypeCase match {
         case proto.Plan.OpTypeCase.COMMAND => handleCommand(executeHolder.request)
@@ -245,7 +252,7 @@ private[connect] class ExecuteThreadRunner(executeHolder: ExecuteHolder) extends
             .createObservedMetricsResponse(
               executeHolder.sessionHolder.sessionId,
               executeHolder.sessionHolder.serverSessionId,
-              executeHolder.request.getPlan.getRoot.getCommon.getPlanId,
+              executeHolder.allObservationAndPlanIds,
               observedMetrics ++ accumulatedInPython))
       }
 
@@ -288,7 +295,8 @@ private[connect] class ExecuteThreadRunner(executeHolder: ExecuteHolder) extends
    *   True if we should delegate sending the final ResultComplete to the handler thread, i.e.
    *   don't send a ResultComplete when the ExecuteThread returns.
    */
-  private def shouldDelegateCompleteResponse(request: proto.ExecutePlanRequest): Boolean = {
+  private[connect] def shouldDelegateCompleteResponse(
+      request: proto.ExecutePlanRequest): Boolean = {
     request.getPlan.getOpTypeCase == proto.Plan.OpTypeCase.COMMAND &&
     request.getPlan.getCommand.getCommandTypeCase ==
       proto.Command.CommandTypeCase.STREAMING_QUERY_LISTENER_BUS_COMMAND &&

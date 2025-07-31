@@ -27,7 +27,7 @@ import org.json4s.JsonAST.JValue
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
 
-import org.apache.spark.{SparkException, SparkIllegalArgumentException, SparkThrowable}
+import org.apache.spark.{SparkIllegalArgumentException, SparkThrowable}
 import org.apache.spark.annotation.Stable
 import org.apache.spark.sql.catalyst.analysis.SqlApiAnalysis
 import org.apache.spark.sql.catalyst.parser.DataTypeParser
@@ -105,6 +105,13 @@ abstract class DataType extends AbstractDataType {
    */
   private[spark] def existsRecursively(f: (DataType) => Boolean): Boolean = f(this)
 
+  /**
+   * Recursively applies the provided partial function `f` to transform this DataType tree.
+   */
+  private[spark] def transformRecursively(f: PartialFunction[DataType, DataType]): DataType = {
+    if (f.isDefinedAt(this)) f(this) else this
+  }
+
   final override private[sql] def defaultConcreteType: DataType = this
 
   override private[sql] def acceptsType(other: DataType): Boolean = sameType(other)
@@ -167,7 +174,7 @@ object DataType {
   def fromJson(json: String): DataType = parseDataType(parse(json))
 
   private val otherTypes = {
-    Seq(
+    (Seq(
       NullType,
       DateType,
       TimestampType,
@@ -195,7 +202,8 @@ object DataType {
       YearMonthIntervalType(MONTH),
       YearMonthIntervalType(YEAR, MONTH),
       TimestampNTZType,
-      VariantType)
+      VariantType) ++
+      (TimeType.MIN_PRECISION to TimeType.MAX_PRECISION).map(TimeType(_)))
       .map(t => t.typeName -> t)
       .toMap
   }
@@ -226,11 +234,15 @@ object DataType {
     }
   }
 
+  private[sql] def parseDataType(json: JValue): DataType = {
+    parseDataType(json, fieldPath = "", collationsMap = Map.empty)
+  }
+
   // NOTE: Map fields must be sorted in alphabetical order to keep consistent with the Python side.
   private[sql] def parseDataType(
       json: JValue,
-      fieldPath: String = "",
-      collationsMap: Map[String, String] = Map.empty): DataType = json match {
+      fieldPath: String,
+      collationsMap: Map[String, String]): DataType = json match {
     case JString(name) =>
       collationsMap.get(fieldPath) match {
         case Some(collation) =>
@@ -340,17 +352,8 @@ object DataType {
         fields.collect { case (fieldPath, JString(collation)) =>
           collation.split("\\.", 2) match {
             case Array(provider: String, collationName: String) =>
-              try {
-                CollationFactory.assertValidProvider(provider)
-                fieldPath -> collationName
-              } catch {
-                case e: SparkException
-                    if e.getCondition == "COLLATION_INVALID_PROVIDER" &&
-                      SqlApiConf.get.allowReadingUnknownCollations =>
-                  // If the collation provider is unknown and the config for reading such
-                  // collations is enabled, return the UTF8_BINARY collation.
-                  fieldPath -> "UTF8_BINARY"
-              }
+              CollationFactory.assertValidProvider(provider)
+              fieldPath -> collationName
           }
         }.toMap
 
@@ -359,16 +362,7 @@ object DataType {
   }
 
   private def stringTypeWithCollation(collationName: String): StringType = {
-    try {
-      StringType(CollationFactory.collationNameToId(collationName))
-    } catch {
-      case e: SparkException
-          if e.getCondition == "COLLATION_INVALID_NAME" &&
-            SqlApiConf.get.allowReadingUnknownCollations =>
-        // If the collation name is unknown and the config for reading such collations is enabled,
-        // return the UTF8_BINARY collation.
-        StringType(CollationFactory.UTF8_BINARY_COLLATION_ID)
-    }
+    StringType(CollationFactory.collationNameToId(collationName))
   }
 
   protected[types] def buildFormattedString(
@@ -458,7 +452,7 @@ object DataType {
   private[sql] def equalsIgnoreCompatibleCollation(from: DataType, to: DataType): Boolean = {
     (from, to) match {
       // String types with possibly different collations are compatible.
-      case (_: StringType, _: StringType) => true
+      case (a: StringType, b: StringType) => a.constraint == b.constraint
 
       case (fromDataType, toDataType) => fromDataType == toDataType
     }

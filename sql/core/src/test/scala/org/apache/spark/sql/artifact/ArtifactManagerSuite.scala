@@ -23,7 +23,8 @@ import java.nio.file.{Files, Path, Paths}
 import org.apache.commons.io.FileUtils
 
 import org.apache.spark.{SparkConf, SparkException}
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.metrics.source.CodegenMetrics
+import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
@@ -47,16 +48,18 @@ class ArtifactManagerSuite extends SharedSparkSession {
   private def sessionUUID: String = spark.sessionUUID
 
   override def afterEach(): Unit = {
-    artifactManager.cleanUpResources()
+    artifactManager.cleanUpResourcesForTesting()
     super.afterEach()
   }
 
   test("Class artifacts are added to the correct directory.") {
+    assume(artifactPath.resolve("smallClassFile.class").toFile.exists)
+
     val copyDir = Utils.createTempDir().toPath
     FileUtils.copyDirectory(artifactPath.toFile, copyDir.toFile)
     val stagingPath = copyDir.resolve("smallClassFile.class")
-    val remotePath = Paths.get("classes/smallClassFile.class")
     assert(stagingPath.toFile.exists())
+    val remotePath = Paths.get("classes/smallClassFile.class")
     artifactManager.addArtifact(remotePath, stagingPath, None)
 
     val movedClassFile = ArtifactManager.artifactRootDirectory
@@ -66,11 +69,13 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("Class file artifacts are added to SC classloader") {
+    assume(artifactPath.resolve("Hello.class").toFile.exists)
+
     val copyDir = Utils.createTempDir().toPath
     FileUtils.copyDirectory(artifactPath.toFile, copyDir.toFile)
     val stagingPath = copyDir.resolve("Hello.class")
-    val remotePath = Paths.get("classes/Hello.class")
     assert(stagingPath.toFile.exists())
+    val remotePath = Paths.get("classes/Hello.class")
     artifactManager.addArtifact(remotePath, stagingPath, None)
 
     val movedClassFile = ArtifactManager.artifactRootDirectory
@@ -90,11 +95,13 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("UDF can reference added class file") {
+    assume(artifactPath.resolve("Hello.class").toFile.exists)
+
     val copyDir = Utils.createTempDir().toPath
     FileUtils.copyDirectory(artifactPath.toFile, copyDir.toFile)
     val stagingPath = copyDir.resolve("Hello.class")
-    val remotePath = Paths.get("classes/Hello.class")
     assert(stagingPath.toFile.exists())
+    val remotePath = Paths.get("classes/Hello.class")
 
     artifactManager.addArtifact(remotePath, stagingPath, None)
 
@@ -169,6 +176,8 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("SPARK-43790: Forward artifact file to cloud storage path") {
+    assume(artifactPath.resolve("smallClassFile.class").toFile.exists)
+
     val copyDir = Utils.createTempDir().toPath
     val destFSDir = Utils.createTempDir().toPath
     FileUtils.copyDirectory(artifactPath.toFile, copyDir.toFile)
@@ -183,6 +192,8 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("Removal of resources") {
+    assume(artifactPath.resolve("smallClassFile.class").toFile.exists)
+
     withTempPath { path =>
       // Setup cache
       val stagingPath = path.toPath
@@ -208,7 +219,7 @@ class ArtifactManagerSuite extends SharedSparkSession {
         assert(expectedPath.toFile.exists())
 
         // Remove resources
-        artifactManager.cleanUpResources()
+        artifactManager.cleanUpResourcesForTesting()
 
         assert(blockManager.getLocalBytes(blockId).isEmpty)
         assert(!expectedPath.toFile.exists())
@@ -227,6 +238,8 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("Classloaders for spark sessions are isolated") {
+    assume(artifactPath.resolve("Hello.class").toFile.exists)
+
     val session1 = spark.newSession()
     val session2 = spark.newSession()
     val session3 = spark.newSession()
@@ -283,6 +296,8 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("SPARK-44300: Cleaning up resources only deletes session-specific resources") {
+    assume(artifactPath.resolve("Hello.class").toFile.exists)
+
     val copyDir = Utils.createTempDir().toPath
     FileUtils.copyDirectory(artifactPath.toFile, copyDir.toFile)
     val stagingPath = copyDir.resolve("Hello.class")
@@ -293,7 +308,7 @@ class ArtifactManagerSuite extends SharedSparkSession {
     val sessionDirectory = artifactManager.artifactPath.toFile
     assert(sessionDirectory.exists())
 
-    artifactManager.cleanUpResources()
+    artifactManager.cleanUpResourcesForTesting()
     assert(!sessionDirectory.exists())
     assert(ArtifactManager.artifactRootDirectory.toFile.exists())
   }
@@ -334,7 +349,9 @@ class ArtifactManagerSuite extends SharedSparkSession {
   }
 
   test("Added artifact can be loaded by the current SparkSession") {
-    val buffer = Files.readAllBytes(artifactPath.resolve("IntSumUdf.class"))
+    val path = artifactPath.resolve("IntSumUdf.class")
+    assume(path.toFile.exists)
+    val buffer = Files.readAllBytes(path)
     spark.addArtifact(buffer, "IntSumUdf.class")
 
     spark.udf.registerJava("intSum", "IntSumUdf", DataTypes.LongType)
@@ -349,6 +366,8 @@ class ArtifactManagerSuite extends SharedSparkSession {
   private def testAddArtifactToLocalSession(
       classFileToUse: String, binaryName: String)(addFunc: Path => String): Unit = {
     val copyDir = Utils.createTempDir().toPath
+    assume(artifactPath.resolve(classFileToUse).toFile.exists)
+
     FileUtils.copyDirectory(artifactPath.toFile, copyDir.toFile)
     val classPath = copyDir.resolve(classFileToUse)
     assert(classPath.toFile.exists())
@@ -394,12 +413,16 @@ class ArtifactManagerSuite extends SharedSparkSession {
       Files.write(randomFilePath, testBytes)
 
       // Register multiple kinds of artifacts
+      val clsPath = path.resolve("Hello.class")
+      assume(clsPath.toFile.exists)
       artifactManager.addArtifact( // Class
-        Paths.get("classes/Hello.class"), path.resolve("Hello.class"), None)
+        Paths.get("classes/Hello.class"), clsPath, None)
       artifactManager.addArtifact( // Python
         Paths.get("pyfiles/abc.zip"), randomFilePath, None, deleteStagedFile = false)
+      val jarPath = Paths.get("jars/udf_noA.jar")
+      assume(jarPath.toFile.exists)
       artifactManager.addArtifact( // JAR
-        Paths.get("jars/udf_noA.jar"), path.resolve("udf_noA.jar"), None)
+        jarPath, path.resolve("udf_noA.jar"), None)
       artifactManager.addArtifact( // Cached
         Paths.get("cache/test"), randomFilePath, None)
       assert(FileUtils.listFiles(artifactManager.artifactPath.toFile, null, true).size() === 3)
@@ -445,6 +468,60 @@ class ArtifactManagerSuite extends SharedSparkSession {
 
       val msg = instance.getClass.getMethod("msg").invoke(instance)
       assert(msg == "Hello Talon! Nice to meet you!")
+    }
+  }
+
+  test("Codegen cache should be invalid when artifacts are added - class artifact") {
+    withTempDir { dir =>
+      runCodegenTest("class artifact") {
+        val randomFilePath = dir.toPath.resolve("random.class")
+        val testBytes = "test".getBytes(StandardCharsets.UTF_8)
+        Files.write(randomFilePath, testBytes)
+        spark.addArtifact(randomFilePath.toString)
+      }
+    }
+  }
+
+  test("Codegen cache should be invalid when artifacts are added - JAR artifact") {
+    withTempDir { dir =>
+      runCodegenTest("JAR artifact") {
+        val randomFilePath = dir.toPath.resolve("random.jar")
+        val testBytes = "test".getBytes(StandardCharsets.UTF_8)
+        Files.write(randomFilePath, testBytes)
+        spark.addArtifact(randomFilePath.toString)
+      }
+    }
+  }
+
+  private def getCodegenCount: Long = CodegenMetrics.METRIC_COMPILATION_TIME.getCount
+
+  private def runCodegenTest(msg: String)(addOneArtifact: => Unit): Unit = {
+    withSQLConf(SQLConf.ARTIFACTS_SESSION_ISOLATION_ALWAYS_APPLY_CLASSLOADER.key -> "true") {
+      val s = spark
+      import s.implicits._
+
+      val count1 = getCodegenCount
+      // trigger codegen for Dataset
+      Seq(Seq("abc")).toDS().collect()
+      val count2 = getCodegenCount
+      // codegen happens
+      assert(count2 > count1, s"$msg: codegen should happen at the first time")
+
+      // add one artifact, codegen cache should be invalid after this
+      addOneArtifact
+
+      // trigger codegen for another Dataset of same type
+      Seq(Seq("abc")).toDS().collect()
+      // codegen cache should not work for Datasets of same type.
+      val count3 = getCodegenCount
+      assert(count3 > count2, s"$msg: codegen should happen again after adding artifact")
+
+      // trigger again
+      Seq(Seq("abc")).toDS().collect()
+      // codegen should work now as classloader is not changed
+      val count4 = getCodegenCount
+      assert(count4 == count3,
+        s"$msg: codegen should not happen again as classloader is not changed")
     }
   }
 }

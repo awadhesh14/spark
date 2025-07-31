@@ -32,7 +32,10 @@ import org.apache.spark.sql.jdbc.JdbcDialects
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-case class JDBCTable(ident: Identifier, schema: StructType, jdbcOptions: JDBCOptions)
+case class JDBCTable(
+    ident: Identifier,
+    override val schema: StructType,
+    jdbcOptions: JDBCOptions)
   extends Table
   with SupportsRead
   with SupportsWrite
@@ -64,7 +67,7 @@ case class JDBCTable(ident: Identifier, schema: StructType, jdbcOptions: JDBCOpt
       properties: util.Map[String, String]): Unit = {
     JdbcUtils.withConnection(jdbcOptions) { conn =>
       JdbcUtils.classifyException(
-        errorClass = "FAILED_JDBC.CREATE_INDEX",
+        condition = "FAILED_JDBC.CREATE_INDEX",
         messageParameters = Map(
           "url" -> jdbcOptions.getRedactUrl(),
           "indexName" -> toSQLId(indexName),
@@ -87,7 +90,7 @@ case class JDBCTable(ident: Identifier, schema: StructType, jdbcOptions: JDBCOpt
   override def dropIndex(indexName: String): Unit = {
     JdbcUtils.withConnection(jdbcOptions) { conn =>
       JdbcUtils.classifyException(
-        errorClass = "FAILED_JDBC.DROP_INDEX",
+        condition = "FAILED_JDBC.DROP_INDEX",
         messageParameters = Map(
           "url" -> jdbcOptions.getRedactUrl(),
           "indexName" -> toSQLId(indexName),
